@@ -21,6 +21,55 @@ function prettyErr(err) {
 }
 
 export default function App() {
+
+  // ---- Telemetry (dinamik topic + type + field path) ----
+  const [telemetry, setTelemetry] = useState({
+    battery: {
+      enabled: true,
+      topic: "/battery_state",
+      messageType: "sensor_msgs/BatteryState",
+      // BatteryState için örnek alanlar: percentage (0..1), voltage (V), current (A)...
+      valuePath: "percentage", // yüzde için
+      auxPath: "voltage",      // voltaj için
+      // Eğer valuePath 0..1 ise yüzdeye çevirmek için:
+      scale: 100,
+      unit: "%",
+      auxUnit: "V",
+      json: false,
+    },
+    temp: {
+      enabled: true,
+      topic: "/system/temperature",
+      messageType: "std_msgs/Float32",
+      valuePath: "data",
+      scale: 1,
+      unit: "°C",
+      json: false,
+    },
+    fan: {
+      enabled: true,
+      topic: "/system/fan_rpm",
+      messageType: "std_msgs/Float32",
+      valuePath: "data",
+      scale: 1,
+      unit: "rpm",
+      json: false,
+    },
+  });
+
+  const [telemetryErr, setTelemetryErr] = useState("");
+  const [telemetryValues, setTelemetryValues] = useState({
+    battery: { value: null, aux: null, ts: 0 },
+    temp: { value: null, aux: null, ts: 0 },
+    fan: { value: null, aux: null, ts: 0 },
+  });
+
+  const telemetrySubsRef = useRef({
+    battery: null,
+    temp: null,
+    fan: null,
+  });
+
   const [wsUrl, setWsUrl] = useState(guessWsUrl());
   const [topicName, setTopicName] = useState("/cmd_vel");
 
@@ -176,6 +225,90 @@ export default function App() {
     };
   }, [controlMode]); 
 
+    const getByPath = (obj, path) => {
+    if (!obj || !path) return undefined;
+    const parts = String(path).split(".").map(s => s.trim()).filter(Boolean);
+    let cur = obj;
+    for (const p of parts) {
+      if (cur == null) return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  };
+
+  const parseMaybeJson = (msg, cfg) => {
+    if (!cfg?.json) return msg;
+    // json=true ise msg.data string varsayalım
+    const raw = msg?.data;
+    if (typeof raw !== "string") return msg;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return msg;
+    }
+  };
+
+  const cleanupTelemetry = () => {
+    const subs = telemetrySubsRef.current;
+    ["battery", "temp", "fan"].forEach((k) => {
+      try { subs[k]?.unsubscribe(); } catch (_) {}
+      subs[k] = null;
+    });
+  };
+
+  useEffect(() => {
+    if (!isConnected || !rosRef.current) {
+      cleanupTelemetry();
+      return;
+    }
+
+    setTelemetryErr("");
+    cleanupTelemetry();
+
+    const subs = telemetrySubsRef.current;
+
+    const makeSub = (key) => {
+      const cfg = telemetry[key];
+      if (!cfg?.enabled) return;
+
+      try {
+        const t = new ROSLIB.Topic({
+          ros: rosRef.current,
+          name: cfg.topic,
+          messageType: cfg.messageType,
+        });
+
+        t.subscribe((msg) => {
+          const m = parseMaybeJson(msg, cfg);
+
+          const rawVal = getByPath(m, cfg.valuePath);
+          const rawAux = cfg.auxPath ? getByPath(m, cfg.auxPath) : undefined;
+
+          const valNum = typeof rawVal === "number" ? rawVal : (rawVal != null ? Number(rawVal) : null);
+          const auxNum = typeof rawAux === "number" ? rawAux : (rawAux != null ? Number(rawAux) : null);
+
+          const scaled = valNum == null || !isFinite(valNum) ? null : valNum * (cfg.scale ?? 1);
+          const scaledAux = auxNum == null || !isFinite(auxNum) ? null : auxNum;
+
+          setTelemetryValues((prev) => ({
+            ...prev,
+            [key]: { value: scaled, aux: scaledAux, ts: Date.now() },
+          }));
+        });
+
+        subs[key] = t;
+      } catch (e) {
+        setTelemetryErr((prev) => prev || `${key} sub hata: ${prettyErr(e)}`);
+      }
+    };
+
+    makeSub("battery");
+    makeSub("temp");
+    makeSub("fan");
+
+    return cleanupTelemetry;
+  }, [isConnected, telemetry]);
+
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -281,6 +414,48 @@ export default function App() {
           </div>
         </div>
 
+                  {/* Telemetry Bar */}
+          <div style={{ background: '#1e293b', borderRadius: '0.5rem', padding: '0.75rem', border: '1px solid #334155', marginTop: '0.5rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth < 768 ? '1fr' : 'repeat(3, 1fr)', gap: '0.5rem' }}>
+              {[
+                { k: "battery", title: "🔋 Batarya" },
+                { k: "temp", title: "🌡️ Sıcaklık" },
+                { k: "fan", title: "🌀 Fan" },
+              ].map(({ k, title }) => {
+                const cfg = telemetry[k];
+                const val = telemetryValues[k]?.value;
+                const aux = telemetryValues[k]?.aux;
+                const ageMs = telemetryValues[k]?.ts ? (Date.now() - telemetryValues[k].ts) : null;
+
+                return (
+                  <div key={k} style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem', opacity: cfg.enabled ? 1 : 0.4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                      <div style={{ fontWeight: '800', fontSize: '0.875rem' }}>{title}</div>
+                      <div style={{ fontSize: '0.625rem', color: '#94a3b8', fontFamily: 'monospace', textAlign: 'right' }}>
+                        {cfg.topic}
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: '1.25rem', fontWeight: '900' }}>
+                      {val == null || !isFinite(val) ? "--" : `${k === "battery" ? val.toFixed(0) : val.toFixed(1)} ${cfg.unit || ""}`}
+                    </div>
+
+                    {k === "battery" && (
+                      <div style={{ fontSize: '0.75rem', color: '#cbd5e1', marginTop: '0.15rem' }}>
+                        {aux == null || !isFinite(aux) ? "" : `${aux.toFixed(2)} ${cfg.auxUnit || ""}`}
+                      </div>
+                    )}
+
+                    <div style={{ fontSize: '0.625rem', color: '#94a3b8', marginTop: '0.35rem' }}>
+                      {telemetryErr ? `⚠️ ${telemetryErr}` : (!cfg.enabled ? "Kapalı" : (ageMs == null ? "Veri yok" : `Son: ${(ageMs/1000).toFixed(1)}s`))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+
         {/* Settings Panel */}
         {showSettings && (
           <div style={{ background: '#1e293b', borderRadius: '0.5rem', padding: '1rem', marginBottom: '0.75rem', border: '1px solid #334155', flexShrink: 0 }}>
@@ -341,6 +516,115 @@ export default function App() {
                 />
               </div>
             </div>
+                        {/* Telemetry Settings */}
+            <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#0f172a', borderRadius: '0.375rem', border: '1px solid #334155' }}>
+              <div style={{ fontWeight: '700', marginBottom: '0.5rem', fontSize: '0.875rem' }}>📡 Telemetry Ayarları (Dinamik)</div>
+
+              {["battery","temp","fan"].map((k) => {
+                const label = k === "battery" ? "Batarya" : k === "temp" ? "Sıcaklık" : "Fan";
+                const cfg = telemetry[k];
+                return (
+                  <div key={k} style={{ marginBottom: '0.75rem', padding: '0.5rem', border: '1px solid #334155', borderRadius: '0.375rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                      <div style={{ fontWeight: '600', fontSize: '0.8125rem' }}>{label}</div>
+                      <label style={{ fontSize: '0.75rem', color: '#cbd5e1', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={!!cfg.enabled}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], enabled: e.target.checked } }))}
+                        />
+                        aktif
+                      </label>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth < 768 ? '1fr' : '2fr 2fr 1fr 1fr', gap: '0.5rem' }}>
+                      <div>
+                        <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>Topic</div>
+                        <input
+                          value={cfg.topic}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], topic: e.target.value } }))}
+                          style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                        />
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>messageType</div>
+                        <input
+                          value={cfg.messageType}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], messageType: e.target.value } }))}
+                          placeholder="std_msgs/Float32"
+                          style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                        />
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>valuePath</div>
+                        <input
+                          value={cfg.valuePath}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], valuePath: e.target.value } }))}
+                          placeholder="data"
+                          style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                        />
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>scale</div>
+                        <input
+                          type="number"
+                          value={cfg.scale ?? 1}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], scale: Number(e.target.value) } }))}
+                          style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* battery için auxPath */}
+                    {k === "battery" && (
+                      <div style={{ marginTop: '0.5rem', display: 'grid', gridTemplateColumns: window.innerWidth < 768 ? '1fr' : '2fr 1fr 1fr', gap: '0.5rem' }}>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>auxPath (voltaj vb)</div>
+                          <input
+                            value={cfg.auxPath || ""}
+                            onChange={(e) => setTelemetry((p) => ({ ...p, battery: { ...p.battery, auxPath: e.target.value } }))}
+                            placeholder="voltage"
+                            style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>unit</div>
+                          <input
+                            value={cfg.unit || ""}
+                            onChange={(e) => setTelemetry((p) => ({ ...p, battery: { ...p.battery, unit: e.target.value } }))}
+                            style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', marginBottom: '0.25rem', color: '#cbd5e1' }}>auxUnit</div>
+                          <input
+                            value={cfg.auxUnit || ""}
+                            onChange={(e) => setTelemetry((p) => ({ ...p, battery: { ...p.battery, auxUnit: e.target.value } }))}
+                            style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.8125rem' }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* JSON toggle */}
+                    <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#cbd5e1', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <label style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={!!cfg.json}
+                          onChange={(e) => setTelemetry((p) => ({ ...p, [k]: { ...p[k], json: e.target.checked } }))}
+                        />
+                        std_msgs/String JSON parse
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
 
             {/* Kontrol Modu Seçimi */}
             <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#0f172a', borderRadius: '0.375rem', border: '1px solid #334155' }}>
