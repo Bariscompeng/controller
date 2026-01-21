@@ -79,19 +79,23 @@ export default function App() {
 
   const [linearMax, setLinearMax] = useState(0.6);
   const [angularMax, setAngularMax] = useState(1.2);
-
+  const [emergencyTopic, setEmergencyTopic] = useState("/emergency");
+  const [emergencyMessageType, setEmergencyMessageType] = useState("std_msgs/Bool");
   const [estop, setEstop] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [controlMode, setControlMode] = useState("joystick"); 
 
   const rosRef = useRef(null);
   const cmdVelTopicRef = useRef(null);
+  const emergencyTopicRef = useRef(null);
 
   const joystickZoneRef = useRef(null);
   const joystickRef = useRef(null);
 
   const axesRef = useRef({ x: 0, y: 0 });
   const timerRef = useRef(null);
+
+  
 
   const twistTemplate = useMemo(
     () => ({
@@ -112,6 +116,13 @@ export default function App() {
     };
     topic.publish(msg);
   };
+  const publishEmergency = (isEmergency) => {
+  const topic = emergencyTopicRef.current;
+  if (!topic) return;
+
+  const msg = { data: isEmergency };
+  topic.publish(msg);
+};
 
   const safeStop = () => {
     axesRef.current = { x: 0, y: 0 };
@@ -127,6 +138,7 @@ export default function App() {
         timerRef.current = null;
       }
       cmdVelTopicRef.current = null;
+      emergencyTopicRef.current = null;
       if (rosRef.current) {
         rosRef.current.close();
         rosRef.current = null;
@@ -135,6 +147,8 @@ export default function App() {
     setIsConnected(false);
     setStatusText("Bağlı değil");
   };
+
+
 
   const connect = () => {
     disconnect();
@@ -153,7 +167,12 @@ export default function App() {
         name: topicName,
         messageType: "geometry_msgs/Twist",
       });
-    });
+      emergencyTopicRef.current = new ROSLIB.Topic({
+        ros,
+        name: emergencyTopic,
+        messageType: emergencyMessageType,
+      });
+});
 
     ros.on("close", () => {
       setIsConnected(false);
@@ -317,7 +336,7 @@ export default function App() {
       if (!isConnected) return;
 
       if (estop) {
-        publishTwist(0, 0);
+        
         return;
       }
 
@@ -458,7 +477,7 @@ export default function App() {
 
         {/* Settings Panel */}
         {showSettings && (
-          <div style={{ background: '#1e293b', borderRadius: '0.5rem', padding: '1rem', marginBottom: '0.75rem', border: '1px solid #334155', flexShrink: 0 }}>
+          <div style={{ background: '#1e293b', borderRadius: '0.5rem', padding: '1rem', marginBottom: '0.75rem', border: '1px solid #334155', flexShrink: 0,maxHeight: '60vh',overflowY: 'auto',overflowX: 'hidden' }}>
             <h2 style={{ fontSize: '1rem', fontWeight: 'bold', marginBottom: '0.75rem', marginTop: 0 }}>
               ⚙️ Ayarlar
             </h2>
@@ -486,6 +505,31 @@ export default function App() {
                   value={topicName}
                   onChange={(e) => setTopicName(e.target.value)}
                   placeholder="/cmd_vel"
+                  style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.875rem' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.375rem' }}>
+                  Emergency Topic
+                </label>
+                <input
+                  type="text"
+                  value={emergencyTopic}
+                  onChange={(e) => setEmergencyTopic(e.target.value)}
+                  placeholder="/emergency"
+                  style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.875rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.375rem' }}>
+                  Emergency Msg Type
+                </label>
+                <input
+                  type="text"
+                  value={emergencyMessageType}
+                  onChange={(e) => setEmergencyMessageType(e.target.value)}
+                  placeholder="std_msgs/Bool"
                   style={{ width: '100%', padding: '0.5rem', background: '#334155', border: '1px solid #475569', borderRadius: '0.375rem', color: 'white', outline: 'none', fontSize: '0.875rem' }}
                 />
               </div>
@@ -940,7 +984,7 @@ export default function App() {
             
             <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', alignItems: 'stretch' }}>
               <button
-                onClick={() => { setEstop(true); safeStop(); }}
+                onClick={() => { setEstop(true); publishEmergency(true); }}
                 style={{
                   padding: window.innerWidth < 768 ? '1.5rem 1rem' : '2rem 1.5rem',
                   background: '#dc2626',
@@ -962,7 +1006,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => { setEstop(false); safeStop(); }}
+                onClick={() => { setEstop(false); publishEmergency(false); }}
                 style={{
                   padding: window.innerWidth < 768 ? '1.5rem 1rem' : '2rem 1.5rem',
                   background: estop ? '#16a34a' : '#334155',
@@ -987,7 +1031,7 @@ export default function App() {
             {estop && (
               <div style={{ marginTop: '0.75rem', padding: '0.5rem', background: 'rgba(220, 38, 38, 0.2)', border: '1px solid #dc2626', borderRadius: '0.375rem', textAlign: 'center', flexShrink: 0 }}>
                 <div style={{ fontWeight: 'bold', color: '#f87171', fontSize: '0.75rem' }}>⚠️ ACİL DURDURMA AKTİF</div>
-                <div style={{ fontSize: '0.625rem', marginTop: '0.125rem' }}>Robot hareket edemez</div>
+                <div style={{ fontSize: '0.625rem', marginTop: '0.125rem' }}>Emergency topic: {emergencyTopic} → true</div>
               </div>
             )}
           </div>
